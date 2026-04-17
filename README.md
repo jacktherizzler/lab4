@@ -70,8 +70,8 @@ Recommended initial values:
 
 The workflow pushes:
 
-- `<DOCKERHUB_USERNAME>/wine_predict_2022BCD0002:latest`
-- `<DOCKERHUB_USERNAME>/wine_predict_2022BCD0002:<github_sha>`
+- `<DOCKERHUB_USERNAME>/wine_predict_2022bcd0002:latest`
+- `<DOCKERHUB_USERNAME>/wine_predict_2022bcd0002:<github_sha>`
 
 ## Local Validation
 
@@ -134,4 +134,3 @@ Submit:
    - Docker Hub image repository
    - pulled image running locally
    - successful inference response
-

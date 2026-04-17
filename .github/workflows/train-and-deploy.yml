@@ -9,7 +9,7 @@ on:
       - main
 
 env:
-  IMAGE_NAME: wine_predict_2022BCD0002
+  IMAGE_NAME: wine_predict_2022bcd0002
   MODEL_ARTIFACT_NAME: trained-model-artifacts
 
 jobs:
