@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+.venv/
+venv/
+env/
+outputs/*.pkl
+outputs/*.json
+!outputs/.gitkeep
+model/*.pkl
+model/*.json
+!model/.gitkeep
+

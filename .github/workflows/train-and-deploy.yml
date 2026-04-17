@@ -1,0 +1,205 @@
+name: Train And Deploy Wine Model
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  IMAGE_NAME: wine_predict_2022BCD0002
+  MODEL_ARTIFACT_NAME: trained-model-artifacts
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    outputs:
+      mse: ${{ steps.capture.outputs.mse }}
+      r2: ${{ steps.capture.outputs.r2 }}
+      student_name: ${{ steps.capture.outputs.student_name }}
+      roll_no: ${{ steps.capture.outputs.roll_no }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Train model
+        run: python scripts/train.py
+
+      - name: Capture metrics
+        id: capture
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          results = json.loads(open("outputs/results.json", encoding="utf-8").read())
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"mse={results['mse']}\n")
+              f.write(f"r2={results['r2_score']}\n")
+              f.write(f"student_name={results['student_name']}\n")
+              f.write(f"roll_no={results['roll_no']}\n")
+          PY
+
+      - name: Write training summary
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          results = json.loads(open("outputs/results.json", encoding="utf-8").read())
+          summary = f"""# Training Summary
+
+          **Name:** {results["student_name"]}
+          **Roll Number:** {results["roll_no"]}
+
+          | Metric | Value |
+          | --- | --- |
+          | MSE | {results["mse"]:.6f} |
+          | R2 Score | {results["r2_score"]:.6f} |
+          """
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "w", encoding="utf-8") as f:
+              f.write(summary)
+          PY
+
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.MODEL_ARTIFACT_NAME }}
+          path: |
+            outputs/trained_model.pkl
+            outputs/results.json
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: train
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download trained artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.MODEL_ARTIFACT_NAME }}
+          path: model
+
+      - name: Decide whether to deploy
+        id: gate
+        env:
+          CURRENT_MSE: ${{ needs.train.outputs.mse }}
+          CURRENT_R2: ${{ needs.train.outputs.r2 }}
+          BEST_MSE: ${{ vars.BEST_MSE }}
+          BEST_R2: ${{ vars.BEST_R2 }}
+          ROLL_NO: ${{ needs.train.outputs.roll_no }}
+        run: |
+          python - <<'PY'
+          import math
+          import os
+          from pathlib import Path
+
+          current_mse = float(os.environ["CURRENT_MSE"])
+          current_r2 = float(os.environ["CURRENT_R2"])
+
+          best_mse_raw = os.environ.get("BEST_MSE", "").strip()
+          best_r2_raw = os.environ.get("BEST_R2", "").strip()
+
+          best_mse = float(best_mse_raw) if best_mse_raw else math.inf
+          best_r2 = float(best_r2_raw) if best_r2_raw else -math.inf
+
+          should_deploy = current_mse < best_mse and current_r2 > best_r2
+          message = (
+              f"{os.environ['ROLL_NO']}----Metrics improved. Proceeding with deployment."
+              if should_deploy
+              else f"{os.environ['ROLL_NO']}----Metric did not improve"
+          )
+
+          with open(Path(os.environ["GITHUB_OUTPUT"]), "a", encoding="utf-8") as f:
+              f.write(f"should_deploy={'true' if should_deploy else 'false'}\n")
+              f.write(f"message={message}\n")
+          PY
+
+      - name: Write deployment decision
+        run: echo "${{ steps.gate.outputs.message }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Docker Buildx
+        if: steps.gate.outputs.should_deploy == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: steps.gate.outputs.should_deploy == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        if: steps.gate.outputs.should_deploy == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Update best metrics variables
+        if: steps.gate.outputs.should_deploy == 'true'
+        env:
+          GH_PAT: ${{ secrets.GH_REPO_PAT }}
+          REPO: ${{ github.repository }}
+          CURRENT_MSE: ${{ needs.train.outputs.mse }}
+          CURRENT_R2: ${{ needs.train.outputs.r2 }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.request
+
+          repo = os.environ["REPO"]
+          owner, repo_name = repo.split("/", 1)
+          token = os.environ["GH_PAT"]
+
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          for name, value in {
+              "BEST_MSE": os.environ["CURRENT_MSE"],
+              "BEST_R2": os.environ["CURRENT_R2"],
+          }.items():
+              payload = json.dumps({"name": name, "value": value}).encode("utf-8")
+              url = (
+                  f"https://api.github.com/repos/{owner}/{repo_name}/actions/variables/{name}"
+              )
+              request = urllib.request.Request(url, data=payload, headers=headers, method="PATCH")
+              try:
+                  with urllib.request.urlopen(request) as response:
+                      response.read()
+              except urllib.error.HTTPError as exc:
+                  if exc.code == 404:
+                      create_url = f"https://api.github.com/repos/{owner}/{repo_name}/actions/variables"
+                      create_request = urllib.request.Request(
+                          create_url,
+                          data=payload,
+                          headers=headers,
+                          method="POST",
+                      )
+                      with urllib.request.urlopen(create_request) as response:
+                          response.read()
+                  else:
+                      raise
+          PY
